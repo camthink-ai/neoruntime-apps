@@ -10,7 +10,7 @@ FROM python:3.11-slim-bookworm
 # SDK from PyPI, pinned via --build-arg SDK_VERSION by the builder; the
 # default only matters for a bare `docker build` without the helper; the
 # pinned source is sdk.lock at the repo root (NEORUNTIME_SDK_VERSION overrides).
-ARG SDK_VERSION=0.8.0
+ARG SDK_VERSION=0.8.1
 RUN pip install --no-cache-dir \
     "neoruntime-ipc-sdk==${SDK_VERSION}" \
     "opencv-python-headless" \

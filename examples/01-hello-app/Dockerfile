@@ -21,7 +21,7 @@ WORKDIR /app
 # default only matters for a bare `docker build` without the helper; the
 # pinned source is sdk.lock at the repo root (NEORUNTIME_SDK_VERSION
 # overrides).
-ARG SDK_VERSION=0.8.0
+ARG SDK_VERSION=0.8.1
 RUN pip install --no-cache-dir "neoruntime-ipc-sdk==${SDK_VERSION}"
 
 COPY app.py /app/app.py
