@@ -26,7 +26,7 @@ WORKDIR /app
 # lets release candidates ride unpublished SDK changes during bundle builds.
 # The default only matters for a bare `docker build` without the helper; the
 # pinned source is sdk.lock at the repo root (NEORUNTIME_SDK_VERSION overrides).
-ARG SDK_VERSION=0.8.0
+ARG SDK_VERSION=0.8.1
 COPY sdk-wheels/ /tmp/sdk-wheels/
 RUN set -e; \
     sdk_wheel="$(find /tmp/sdk-wheels -maxdepth 1 -name "neoruntime_ipc_sdk-${SDK_VERSION}-*.whl" -print -quit)"; \
