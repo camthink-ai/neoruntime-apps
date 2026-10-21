@@ -12,15 +12,10 @@ on:
       - "scripts/smoke_image.sh"
       - "sdk.lock"
       - ".github/workflows/examples-build.yml"
+  # Always create the stable PR checks. The discover job decides whether a
+  # build is needed; workflow-level path filtering can leave required checks
+  # permanently pending.
   pull_request:
-    paths:
-      - "examples/**"
-      - "scripts/build_app.sh"
-      - "scripts/fetch_models.sh"
-      - "scripts/resolve_sdk_version.sh"
-      - "scripts/smoke_image.sh"
-      - "sdk.lock"
-      - ".github/workflows/examples-build.yml"
   workflow_dispatch:
     inputs:
       example:
@@ -30,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: examples-${{ github.ref }}
@@ -37,45 +33,94 @@ concurrency:
 
 jobs:
   discover:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       examples: ${{ steps.discover.outputs.examples }}
+      has-changes: ${{ steps.discover.outputs.has-changes }}
 
     steps:
       - name: Checkout apps repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Discover examples
+      - name: Discover affected examples
         id: discover
+        uses: actions/github-script@v9
         env:
           REQUESTED_EXAMPLE: ${{ inputs.example }}
-        run: |
-          set -euo pipefail
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
 
-          if [ -n "$REQUESTED_EXAMPLE" ]; then
-            test -f "examples/$REQUESTED_EXAMPLE/Dockerfile"
-            test -f "examples/$REQUESTED_EXAMPLE/app.yaml"
-            printf 'examples=["%s"]\n' "$REQUESTED_EXAMPLE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            const available = fs.readdirSync('examples', {withFileTypes: true})
+              .filter((entry) => entry.isDirectory())
+              .map((entry) => entry.name)
+              .filter((name) =>
+                fs.existsSync(path.join('examples', name, 'Dockerfile')) &&
+                fs.existsSync(path.join('examples', name, 'app.yaml')),
+              )
+              .sort();
 
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          from pathlib import Path
+            const requested = (process.env.REQUESTED_EXAMPLE || '').trim();
+            let selected = [];
 
-          examples = [
-              path.name
-              for path in sorted(Path("examples").iterdir())
-              if path.is_dir()
-              and (path / "Dockerfile").is_file()
-              and (path / "app.yaml").is_file()
-          ]
-          print(f"examples={json.dumps(examples)}")
-          PY
+            if (context.eventName === 'workflow_dispatch') {
+              if (requested && !available.includes(requested)) {
+                core.setFailed(`Unknown example: ${requested}`);
+                return;
+              }
+              selected = requested ? [requested] : available;
+            } else if (context.eventName !== 'pull_request') {
+              // Main pushes validate the complete set.
+              selected = available;
+            } else {
+              try {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  per_page: 100,
+                });
+                const changedPaths = files.flatMap((file) =>
+                  file.previous_filename
+                    ? [file.filename, file.previous_filename]
+                    : [file.filename],
+                );
+                const sharedPaths = new Set([
+                  '.github/workflows/examples-build.yml',
+                  'scripts/build_app.sh',
+                  'scripts/fetch_models.sh',
+                  'scripts/resolve_sdk_version.sh',
+                  'scripts/smoke_image.sh',
+                  'sdk.lock',
+                ]);
+                const runAll = files.length >= 3000 ||
+                  changedPaths.some((changedPath) => sharedPaths.has(changedPath));
+                selected = runAll
+                  ? available
+                  : available.filter((name) =>
+                      changedPaths.some((changedPath) =>
+                        changedPath.startsWith(`examples/${name}/`),
+                      ),
+                    );
+              } catch (error) {
+                // A detector failure must increase coverage, never reduce it.
+                core.warning(`Unable to classify changed files: ${error.message}`);
+                selected = available;
+              }
+            }
+
+            core.setOutput('examples', JSON.stringify(selected));
+            core.setOutput('has-changes', selected.length > 0 ? 'true' : 'false');
+            await core.summary
+              .addHeading('Example build scope', 3)
+              .addList(selected.length > 0 ? selected : ['No example builds required'])
+              .write();
 
   build:
     needs: discover
-    runs-on: ubuntu-latest
+    if: needs.discover.outputs.has-changes == 'true'
+    runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
@@ -83,15 +128,10 @@ jobs:
 
     steps:
       - name: Checkout apps repository
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build example (arm64)
         run: |
@@ -102,3 +142,26 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/smoke_image.sh examples/${{ matrix.example }}
+
+  examples-ci:
+    name: Examples CI
+    needs:
+      - discover
+      - build
+    if: always()
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Verify example jobs
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          HAS_CHANGES: ${{ needs.discover.outputs.has-changes }}
+        run: |
+          set -euo pipefail
+          test "$DISCOVER_RESULT" = success
+          if [ "$HAS_CHANGES" = true ]; then
+            test "$BUILD_RESULT" = success
+          else
+            test "$BUILD_RESULT" = skipped
+          fi
