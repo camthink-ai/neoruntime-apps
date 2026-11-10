@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # SDK from PyPI (pinned via SDK_VERSION build-arg; default for bare docker build)
-ARG SDK_VERSION=0.8.0
+ARG SDK_VERSION=0.8.1
 RUN pip install --no-cache-dir "neoruntime-ipc-sdk==${SDK_VERSION}"
 
 # Copy application dependencies

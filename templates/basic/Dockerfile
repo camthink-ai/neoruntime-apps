@@ -16,7 +16,7 @@ LABEL description="NeoRuntime Application Template"
 WORKDIR /app
 
 # NeoRuntime SDK from PyPI
-ARG SDK_VERSION=0.8.0
+ARG SDK_VERSION=0.8.1
 RUN pip install --no-cache-dir "neoruntime-ipc-sdk==${SDK_VERSION}"
 
 # Copy application files
