@@ -1,6 +1,6 @@
 FROM python:3.11-slim-bookworm
 
-LABEL version="0.1.1"
+LABEL version="0.1.2"
 LABEL description="GymOps Pose Coach - gym pose analysis, counting, zone occupancy, safety alerts"
 
 # HTTPS apt sources: some build networks block plain-HTTP egress (deb.debian.org:80)
@@ -26,17 +26,19 @@ RUN sed -i 's/extensions=\[PerMessageDeflate()\]/extensions=[]/' \
     $(python3 -c "import simple_websocket.ws; print(simple_websocket.ws.__file__)")
 
 COPY config.py pose.py counter.py zones.py alerts.py overlay.py \
-     video_source.py tracker.py app.py \
+     video_source.py tracker.py app.py registration.py \
      exercise_classifier.py equipment_stats.py \
      face_crop.py face_db.py \
      audio_prompt.py access_control.py trajectory.py /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
 
-# Bundled models (zoo yolov8s_pose via models.manifest + vendored
-# hailo_yolov8n_384_640). NOT /opt/aipc/models — app.yaml bind-mounts host
-# /data/aipc/models there, which would shadow image content on device.
-COPY models/ /opt/aipc/bundled-models/
+# Model artifacts: AMPK .bin packages (spec.models — app-manager extracts
+# them from the IMAGE content at install, so the runtime bind-mount that
+# shadows /opt/aipc/models in the running container is irrelevant) plus the
+# vendored .hef sources kept for on-device debugging/A-B. Same layout as
+# parking-lot.
+COPY models/ /opt/aipc/models/
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 RUN mkdir -p /app/uploads && chown appuser:appuser /app/uploads

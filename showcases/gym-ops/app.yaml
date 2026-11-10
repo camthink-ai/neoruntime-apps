@@ -7,20 +7,44 @@ kind: Application
 metadata:
   id: gym-ops
   name: GymOps Pose Coach
-  version: 0.1.1
+  version: 0.1.2
   description: Real-time gym pose coaching with squat/pushup counting, zone occupancy, and safety alerts
   author: NeoRuntime Team
 
 spec:
-  image: neoruntime/gym-ops:0.1.1
+  image: neoruntime/gym-ops:0.1.2
+
+  # App-owned models, each an AMPK .bin package COPY'd into the image at
+  # /opt/aipc/models/ (generated from the vendored .hef artifacts by
+  # scripts/make_ampk_package.py — embedded HEF bytes are identical).
+  # At install app-manager extracts the package from the IMAGE (the
+  # runtime bind-mount shadowing of /opt/aipc/models does not matter),
+  # unpacks the HEF host-side under app-models/<app>/<alias>/ and preloads
+  # the registration (Transient, OwnerId=gym-ops, re-registered at every
+  # reboot). The pose package pins postprocess_profile=yolov8_pose so the
+  # preloaded variant already carries the create-time native_yolov8_pose
+  # decoder flag; the app's startup registration keeps a correct incumbent
+  # (see app.py _register_model / registration.py).
+  # Requires a platform app-manager with bundled-package support
+  # (platform/app-manager/server/bundled_package.go, ≥ 2026-09-28).
+  models:
+    pose:
+      id: yolov8s_pose
+      path: /opt/aipc/models/yolov8s_pose.bin
+      required: true
+    detect:
+      id: yolov8n
+      path: /opt/aipc/models/hailo_yolov8n_384_640.bin
+      required: true
 
   resources:
     cpu: "300%"
     memory: "1Gi"
 
-  # Read-only access to host model files for yolov8s_pose auto-registration.
-  # app-manager sandbox rewrites this volume host to RootPath()/models on device
-  # (see memory: model-install-path-topology), so the same path works in-slot.
+  # Read-only access to the host model store. Only used by the
+  # self-registration fallback on platforms without bundled-package
+  # preload (see config.py _resolve_model_path); the primary model source
+  # is the spec.models AMPK bundle above.
   volumes:
     - host: /data/aipc/models
       container: /data/aipc/models
@@ -39,6 +63,13 @@ spec:
       - third.raw
 
     inference:
+      # Preload walks this list at app start; every id must resolve to a
+      # platform model row or a spec.models bundle (both do here). The
+      # bundled packages pin the postprocess profiles, so preloads are
+      # already correctly configured and the app keeps them.
+      models:
+        - yolov8s_pose
+        - yolov8n
       max_qps: 30
       max_concurrent: 2
       allow_register_model: true
@@ -112,9 +143,12 @@ spec:
     # 1 = serial (legacy kill-switch); 2 = default pipeline; 3 = deeper.
     - name: PIPELINE_DEPTH
       value: "2"
-    # Face recognition (Phase 2) — empty string disables
+    # Face recognition (Phase 2) — dormant since 0.1.2: the mobilefacenet
+    # pipeline was never wired (no registration/inference), so the model
+    # is neither bundled nor preloaded. Empty string keeps the feature off
+    # until it is actually implemented.
     - name: FACE_MODEL
-      value: "mobilefacenet"
+      value: ""
     - name: FACE_DB_PATH
       value: "/data/aipc/etc/gym-ops/faces.json"
     - name: FACE_THRESHOLD
