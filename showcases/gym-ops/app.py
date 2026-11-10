@@ -39,12 +39,14 @@ from alerts import (
 )
 from config import (
     DEGRADED_FAILURE_THRESHOLD, INFER_TIMEOUT_MS, INFER_WARMUP_COUNT,
-    INFER_WARMUP_TIMEOUT_MS, load_config,
+    INFER_WARMUP_TIMEOUT_MS, MODEL_REGISTER_MAX_FAILURES, load_config,
+)
+from registration import (
+    RegistrationSpec, backend_function, ensure_model, pose_decoder_active,
 )
 from counter import make_counter
 from exercise_classifier import ExerciseClassifier
 from equipment_stats import EquipmentStats
-from face_crop import extract_face_crop, prepare_face_input
 from face_db import FaceDatabase
 from audio_prompt import AudioPrompt
 from access_control import AccessControl
@@ -192,6 +194,11 @@ class GymApp:
         self._stats_thread: threading.Thread | None = None  # bg device_utilization sampler
         self._model_id: str | None = None
         self._detect_model_id: str | None = None  # secondary detection model
+        # Bounded startup retry + fatal health reporting (0.1.2): the old
+        # loop retried registration forever while the web shell stayed
+        # "healthy", hiding a dead inference core from the platform.
+        self._register_failures = 0
+        self._fatal_error: str | None = None
         # P0: detect decimation + measured pose QPS
         self._infer_frame_seq = 0
         self._last_detect_result = None  # reused on decimated frames for zone/count stability
@@ -217,36 +224,43 @@ class GymApp:
         # postprocess_json blob is carried as the variant. The runtime
         # update_postprocess_config path does NOT handle native_yolov8_pose and
         # does not re-run backend selection, so it cannot flip the flag.
+        #
+        # Since 0.1.2 the platform preloads this model from the spec.models
+        # AMPK bundle (its config pins postprocess_profile=yolov8_pose, so
+        # the preloaded variant already carries the decoder flag). When the
+        # preload is present and correct we KEEP it — re-registering over it
+        # used to corrupt the postprocess session. Only a mis-configured
+        # incumbent (e.g. a facial-default row) is force-replaced. See
+        # registration.ensure_model.
         variant = mdef.postprocess_json or mdef.variant
-        mid = self.infer.register_model(
-            model_path=self.cfg.model_full_path(),
-            model_id=mdef.name,
-            owner_id=Config.get_app_id(),
-            model_type=mdef.model_type,
-            model_variant=variant,
-        )
         # Runtime threshold tuning only (apply_config_json handles these
         # numeric keys). native_yolov8_pose is intentionally absent here — it
-        # is already baked into the create-time blob above.
-        cfg_json = json.dumps({
+        # is already baked into the create-time blob above (ours or the
+        # preload's).
+        tunables = json.dumps({
             "score_threshold": self.cfg.score_threshold,
             "keypoint_threshold": self.cfg.keypoint_threshold,
             "nms_threshold": self.cfg.nms_threshold,
             "confidence_threshold": self.cfg.pose_confidence_threshold,
         })
-        try:
-            self.infer.update_postprocess_config(mid, cfg_json)
-        except Exception as e:  # noqa: BLE001
-            print(f"[app] update_postprocess_config failed (non-fatal): {e}")
-        return mid
+        return ensure_model(self.infer, RegistrationSpec(
+            model_path=self.cfg.model_full_path(),
+            model_id=mdef.name,
+            owner_id=Config.get_app_id(),
+            model_type=mdef.model_type,
+            variant=variant,
+            keep_incumbent=pose_decoder_active,
+            tunables_json=tunables,
+            log=print,
+        ))
 
     def _register_detect_model(self) -> str | None:
         """Register the secondary detection model (e.g. yolov8n) for parallel
         inference. Returns model ID or None if disabled/failed.
 
-        IMPORTANT: Must NOT re-register a model that is already registered in
-        ai-runtime — re-registering yolov8s_pose corrupts its postprocess
-        (face_landmarks_lite tensor names appear). Guard with list_models().
+        Since 0.1.2 the platform may preload this model from the spec.models
+        AMPK bundle (profile hailo_yolov8n_384_640, backend_function
+        hailo_yolov8n) — in that case the preloaded registration is kept.
         """
         ddef = self.cfg.detect_model_def()
         if ddef is None:
@@ -254,29 +268,29 @@ class GymApp:
         if not self.cfg.enable_parallel_infer:
             return None
         try:
-            # Guard: skip if already registered (e.g. by PreloadModels or a
-            # previous app restart before ai-runtime restart wiped models).
+            # Fast path: skip when already registered (preload or a previous
+            # app restart before an ai-runtime restart wiped models).
             existing = self.infer.list_models()
             for m in existing:
                 if m.model_id == ddef.name:
                     print(f"[app] detect model already registered: {ddef.name}")
                     return ddef.name
-            mid = self.infer.register_model(
+            # Empty variant → ai-runtime auto-discovers the postprocess config
+            # from the HEF's sidecar json (hailo_yolov8n_384_640.json). A bare
+            # name like "yolov8n" overrides discovery and ai-runtime wraps it as
+            # {"backend_function":"yolov8n"} which is schema-invalid for the YOLO
+            # plugin (HAILO_INVALID_OPERATION). Mirrors model-showcase main.py:2006
+            # which passes None for the same HEF. postprocess_json wins when
+            # present (future custom-nms models like yolov5m_vehicles).
+            return ensure_model(self.infer, RegistrationSpec(
                 model_path=self.cfg.detect_model_full_path(),
                 model_id=ddef.name,
                 owner_id=Config.get_app_id(),
                 model_type=ddef.model_type,
-                # Empty variant → ai-runtime auto-discovers the postprocess config
-                # from the HEF's sidecar json (hailo_yolov8n_384_640.json). A bare
-                # name like "yolov8n" overrides discovery and ai-runtime wraps it as
-                # {"backend_function":"yolov8n"} which is schema-invalid for the YOLO
-                # plugin (HAILO_INVALID_OPERATION). Mirrors model-showcase main.py:2006
-                # which passes None for the same HEF. postprocess_json wins when
-                # present (future custom-nms models like yolov5m_vehicles).
-                model_variant=(ddef.postprocess_json or None),
-            )
-            print(f"[app] detect model registered id={mid}")
-            return mid
+                variant=(ddef.postprocess_json or None),
+                keep_incumbent=backend_function("hailo_yolov8n"),
+                log=print,
+            ))
         except Exception as e:  # noqa: BLE001
             print(f"[app] detect model register failed (parallel infer disabled): {e}")
             return None
@@ -304,9 +318,25 @@ class GymApp:
                 if self._model_id is None:
                     self._model_id = self._register_model()
             except Exception as e:  # noqa: BLE001
-                print(f"[app] model register failed: {e}; retry in 5s")
+                self._register_failures += 1
+                if self._register_failures >= MODEL_REGISTER_MAX_FAILURES:
+                    # Bounded retry (0.1.2): stop hiding a dead core behind a
+                    # healthy web shell — fail the healthcheck so the platform
+                    # restarts the container instead of us looping forever.
+                    self._fatal_error = (
+                        f"model registration failed "
+                        f"{self._register_failures}x: {e}")
+                    print(f"[app] FATAL: {self._fatal_error}; infer loop "
+                          "stopped (healthcheck will fail -> container "
+                          "restart)")
+                    self._running.clear()
+                    return
+                print(f"[app] model register failed "
+                      f"({self._register_failures}/"
+                      f"{MODEL_REGISTER_MAX_FAILURES}): {e}; retry in 5s")
                 time.sleep(5)
                 continue
+            self._register_failures = 0
             print(f"[app] model registered id={self._model_id}")
             # Register secondary detection model for parallel inference
             if self._detect_model_id is None and self.cfg.detect_model:
@@ -338,6 +368,7 @@ class GymApp:
                         self._model_id = None
                     self._detect_model_id = None  # also reset detect model
                     self._consec_fail = 0
+                    self._register_failures = 0
                     time.sleep(2)
                     continue
                 if self._consec_fail >= DEGRADED_FAILURE_THRESHOLD:
@@ -1082,6 +1113,11 @@ class GymApp:
         self.sock.route("/ws/sync-preview")(self._sync_preview_ws)
 
     def _health(self):
+        # 503 on fatal so the container healthcheck (curl -f) actually fails
+        # and the platform restarts us — a 200 "ok:false" would be invisible.
+        if self._fatal_error is not None:
+            return jsonify({"ok": False, "app": "gym-ops",
+                            "error": self._fatal_error}), 503
         return jsonify({"ok": True, "app": "gym-ops", "model": self._model_id,
                         "video_mode": self._video_mode})
 

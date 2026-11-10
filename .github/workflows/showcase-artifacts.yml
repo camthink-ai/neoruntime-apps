@@ -9,14 +9,13 @@ on:
     paths:
       - "showcases/**"
       - "scripts/build_showcase_artifacts.sh"
+      - "scripts/fetch_models.sh"
+      - "scripts/resolve_sdk_version.sh"
       - ".github/workflows/showcase-artifacts.yml"
       - "sdk.lock"
+  # Keep required checks present for every PR. Individual matrix jobs become
+  # inexpensive no-ops when their showcase is unaffected.
   pull_request:
-    paths:
-      - "showcases/**"
-      - "scripts/build_showcase_artifacts.sh"
-      - ".github/workflows/showcase-artifacts.yml"
-      - "sdk.lock"
   workflow_dispatch:
     inputs:
       showcase:
@@ -26,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: showcase-bundles-${{ github.ref }}
@@ -33,81 +33,139 @@ concurrency:
 
 jobs:
   discover:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       showcases: ${{ steps.discover.outputs.showcases }}
+      selected: ${{ steps.discover.outputs.selected }}
+      has-changes: ${{ steps.discover.outputs.has-changes }}
 
     steps:
       - name: Checkout apps repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Discover showcases
+      - name: Discover affected showcases
         id: discover
+        uses: actions/github-script@v9
         env:
           REQUESTED_SHOWCASE: ${{ inputs.showcase }}
-        run: |
-          set -euo pipefail
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
 
-          if [ -n "$REQUESTED_SHOWCASE" ]; then
-            test -f "showcases/$REQUESTED_SHOWCASE/Dockerfile"
-            test -f "showcases/$REQUESTED_SHOWCASE/app.yaml"
-            printf 'showcases=["%s"]\n' "$REQUESTED_SHOWCASE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            const available = fs.readdirSync('showcases', {withFileTypes: true})
+              .filter((entry) => entry.isDirectory())
+              .map((entry) => entry.name)
+              .filter((name) =>
+                fs.existsSync(path.join('showcases', name, 'Dockerfile')) &&
+                fs.existsSync(path.join('showcases', name, 'app.yaml')),
+              )
+              .sort();
 
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          from pathlib import Path
+            const requested = (process.env.REQUESTED_SHOWCASE || '').trim();
+            let selected = [];
 
-          showcases = [
-              path.name
-              for path in sorted(Path("showcases").iterdir())
-              if path.is_dir()
-              and (path / "Dockerfile").is_file()
-              and (path / "app.yaml").is_file()
-          ]
-          print(f"showcases={json.dumps(showcases)}")
-          PY
+            if (context.eventName === 'workflow_dispatch') {
+              if (requested && !available.includes(requested)) {
+                core.setFailed(`Unknown showcase: ${requested}`);
+                return;
+              }
+              selected = requested ? [requested] : available;
+            } else if (context.eventName !== 'pull_request') {
+              // Main and release-tag pushes publish a complete bundle set.
+              selected = available;
+            } else {
+              try {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  per_page: 100,
+                });
+                const changedPaths = files.flatMap((file) =>
+                  file.previous_filename
+                    ? [file.filename, file.previous_filename]
+                    : [file.filename],
+                );
+                const sharedPaths = new Set([
+                  '.github/workflows/showcase-artifacts.yml',
+                  'scripts/build_showcase_artifacts.sh',
+                  'scripts/fetch_models.sh',
+                  'scripts/resolve_sdk_version.sh',
+                  'sdk.lock',
+                ]);
+                const runAll = files.length >= 3000 ||
+                  changedPaths.some((changedPath) => sharedPaths.has(changedPath));
+                selected = runAll
+                  ? available
+                  : available.filter((name) =>
+                      changedPaths.some((changedPath) =>
+                        changedPath.startsWith(`showcases/${name}/`),
+                      ),
+                    );
+              } catch (error) {
+                core.warning(`Unable to classify changed files: ${error.message}`);
+                selected = available;
+              }
+            }
+
+            // The complete matrix is intentional: current branch protection
+            // requires several matrix job names. Unaffected jobs report a
+            // successful no-op until protection moves to Showcases CI.
+            core.setOutput('showcases', JSON.stringify(available));
+            core.setOutput('selected', JSON.stringify(selected));
+            core.setOutput('has-changes', selected.length > 0 ? 'true' : 'false');
+            await core.summary
+              .addHeading('Showcase build scope', 3)
+              .addList(selected.length > 0 ? selected : ['No showcase builds required'])
+              .write();
 
   build:
+    name: build (${{ matrix.showcase }}, ${{ matrix.arch }})
     needs: discover
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
         showcase: ${{ fromJSON(needs.discover.outputs.showcases) }}
         arch:
           - arm64
+    env:
+      SHOULD_BUILD: ${{ contains(fromJSON(needs.discover.outputs.selected), matrix.showcase) && 'true' || 'false' }}
 
     steps:
+      - name: No build required
+        if: env.SHOULD_BUILD != 'true'
+        run: echo "${{ matrix.showcase }} is unaffected"
+
       - name: Checkout apps repository
-        uses: actions/checkout@v4
+        if: env.SHOULD_BUILD == 'true'
+        uses: actions/checkout@v7
         with:
           path: apps
 
-      # teaching demo only: its offline suite guards the SDK-compat and
-      # snippet-anchor contracts; runs before any QEMU time is spent
+      # Teaching demo only: its offline suite guards the SDK-compat and
+      # snippet-anchor contracts; runs before Docker build time is spent.
       - name: Set up Python
-        if: matrix.showcase == 'sdk-teaching-demo'
-        uses: actions/setup-python@v5
+        if: env.SHOULD_BUILD == 'true' && matrix.showcase == 'sdk-teaching-demo'
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       - name: Offline test suite (sdk-teaching-demo)
-        if: matrix.showcase == 'sdk-teaching-demo'
+        if: env.SHOULD_BUILD == 'true' && matrix.showcase == 'sdk-teaching-demo'
         working-directory: apps/showcases/sdk-teaching-demo
         run: |
           set -euo pipefail
           python -m pip install --quiet pytest numpy opencv-python-headless
           python -m pytest tests/ -q
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        if: env.SHOULD_BUILD == 'true'
+        uses: docker/setup-buildx-action@v4
 
       - name: Build showcase bundle
+        if: env.SHOULD_BUILD == 'true'
         working-directory: apps
         run: |
           set -euo pipefail
@@ -117,23 +175,25 @@ jobs:
             "${{ matrix.showcase }}"
 
       - name: Upload showcase bundle
-        uses: actions/upload-artifact@v4
+        if: env.SHOULD_BUILD == 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.showcase }}-${{ matrix.arch }}-bundle
           path: apps/dist/showcases/${{ matrix.showcase }}-*.neoapp
           if-no-files-found: error
-          retention-days: 14
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 7 || 1 }}
+          compression-level: 0
 
   release:
     needs: build
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
       - name: Download showcase bundles
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
@@ -209,4 +269,30 @@ jobs:
               --title "$release_title" \
               --notes-file "$release_notes_file" \
               "${create_flags[@]}"
+          fi
+
+  showcases-ci:
+    name: Showcases CI
+    needs:
+      - discover
+      - build
+      - release
+    if: always()
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Verify showcase jobs
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          IS_RELEASE_PUSH: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        run: |
+          set -euo pipefail
+          test "$DISCOVER_RESULT" = success
+          test "$BUILD_RESULT" = success
+          if [ "$IS_RELEASE_PUSH" = true ]; then
+            test "$RELEASE_RESULT" = success
+          else
+            test "$RELEASE_RESULT" = skipped
           fi
