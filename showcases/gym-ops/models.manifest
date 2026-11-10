@@ -5,9 +5,31 @@
 #     secondary detection model; the generic zoo yolov8n is 640x640 and the
 #     app's input_size=(640, 384) expects this exact build.
 # Zoo pinning rationale: v5.3.0/hailo15h matches the device firmware
-# (HailoRT 5.3.0). yolov8s_pose is registered at runtime with the
-# native_yolov8_pose postprocess blob carried as the model variant — a plain
-# re-register over an existing registration corrupts postprocess, so the app
-# (not the platform) owns this model's lifecycle. Re-verify with
-# `hailortcli parse-hef` before bumping.
+# (HailoRT 5.3.0). Re-verify with `hailortcli parse-hef` before bumping.
+#
+# ---- AMPK .bin packages (0.1.2, spec.models bundles) ----
+# yolov8s_pose.bin / hailo_yolov8n_384_640.bin are AMPK v2 packages that wrap
+# the vendored .hef files byte-identically (meta.hef.sha256 pins the inner
+# bytes; the pose package embeds the same HEF as the zoo row below).
+# app.yaml spec.models declares them; app-manager extracts them from the image
+# at install, unpacks the HEF host-side under app-models/gym-ops/<alias>/ and
+# preloads the registration (postprocess_profile pins the decoder: yolov8_pose
+# => native_yolov8_pose create-time flag; hailo_yolov8n_384_640 => NMS
+# backend). The app keeps a correct preloaded incumbent and only force-replaces
+# a mis-routed one (app.py / registration.py).
+#
+# Regenerate after changing a .hef or its postprocess config (repo root):
+#   python3 scripts/make_ampk_package.py --hef showcases/gym-ops/models/yolov8s_pose.hef \
+#     --out showcases/gym-ops/models/yolov8s_pose.bin \
+#     --model-id yolov8s_pose --model-type keypoint --profile yolov8_pose \
+#     --config '{"threshold": 0.35, "keypoint_threshold": 0.25}' \
+#     --net-name yolov8s_pose --net-width 640 --net-height 640
+#   python3 scripts/make_ampk_package.py --hef showcases/gym-ops/models/hailo_yolov8n_384_640.hef \
+#     --out showcases/gym-ops/models/hailo_yolov8n_384_640.bin \
+#     --model-id yolov8n --model-type detection --profile hailo_yolov8n_384_640 \
+#     --config '{"threshold": 0.25, "nms_threshold": 0.45, "max_detections": 64}' \
+#     --net-name hailo_yolov8n_384_640 --net-width 640 --net-height 384 \
+#     --output-format nms
+# Thresholds mirror config.py MODEL_DEFS postprocess_json (pose) and the
+# detection defaults; keep them in sync when tuning.
 71ee6fd7ab02d66a2f34ecf753cb5adfb5c27bf6fc1a425b93206a76b9819d36	yolov8s_pose.hef	https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.3.0/hailo15h/yolov8s_pose.hef

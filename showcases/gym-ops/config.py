@@ -19,6 +19,10 @@ INFER_TIMEOUT_MS = 1500          # steady-state per-infer timeout
 INFER_WARMUP_TIMEOUT_MS = 6000   # first N inferences after model load
 INFER_WARMUP_COUNT = 3
 DEGRADED_FAILURE_THRESHOLD = 10  # consecutive failures before degraded mode
+# Bounded startup retry: consecutive pose-registration failures before the
+# infer loop gives up and reports unhealthy (the container healthcheck then
+# fails and restart_policy=on-failure restarts us). 12 × 5s ≈ 1 minute.
+MODEL_REGISTER_MAX_FAILURES = 12
 
 
 # ---- COCO-17 keypoint indices (must match hal_internal_yolov8_pose kNumKpts=17) ----
@@ -67,7 +71,13 @@ class ModelDef:
 MODEL_DEFS: dict[str, ModelDef] = {
     "yolov8s_pose": ModelDef(
         name="yolov8s_pose",
-        path="yolov8s_pose.hef",
+        # keypoint/ prefix matches the device model-store layout (global
+        # store: /data/aipc/models/keypoint/yolov8s_pose.hef) — the same
+        # <category>/<file> convention as the yolov8n entry below and as
+        # model-showcase. Only used when the app self-registers (platforms
+        # without spec.models preload); the primary path is the AMPK bundle
+        # declared in app.yaml spec.models.
+        path="keypoint/yolov8s_pose.hef",
         model_type="keypoint",
         variant="yolov8s_pose",
         input_format="nv12",
@@ -104,6 +114,10 @@ MODEL_DEFS: dict[str, ModelDef] = {
     ),
     "mobilefacenet": ModelDef(
         name="mobilefacenet",
+        # DORMANT (0.1.2): face recognition was never wired past config —
+        # no registration, no inference call, no HEF bundled. Kept to
+        # document the planned 112x112 embedding model; FACE_MODEL stays
+        # "" in app.yaml until the pipeline is actually implemented.
         path="face/mobilefacenet.hef",
         model_type="embedding",
         variant="mobilefacenet",
@@ -161,7 +175,9 @@ class GymConfig:
     after_hours: dict = field(default_factory=dict)  # {"start":"22:00","end":"06:00"}
 
     # --- face recognition (Phase 2) ---
-    face_model: str = "mobilefacenet"          # embedding model; "" = disabled
+    # "" since 0.1.2: the mobilefacenet pipeline is dormant (see MODEL_DEFS)
+    # and the app.yaml declaration was disabled to keep the manifest honest.
+    face_model: str = ""                      # embedding model; "" = disabled
     face_db_path: str = "/data/aipc/etc/gym-ops/faces.json"
     face_threshold: float = 0.6               # cosine similarity threshold
     face_cooldown_seconds: float = 30.0       # min seconds between re-ID for same person
@@ -191,22 +207,37 @@ class GymConfig:
     def model_def(self) -> ModelDef:
         return MODEL_DEFS[self.pose_model]
 
-    # Models bundled in the image (flat layout; see Dockerfile). NOT
-    # /opt/aipc/models — app.yaml bind-mounts host /data/aipc/models there,
-    # which would shadow image content on device.
-    _BUNDLED_MODEL_ROOT = "/opt/aipc/bundled-models"
+    # Model-path resolution contract (fixed in 0.1.2): registration paths
+    # must exist on the HOST filesystem, because ai-runtime runs host-side
+    # and opens the path itself. Image-internal paths (e.g. /opt/aipc/*)
+    # are translated by the SDK's translate_path_to_host() to a /data/aipc
+    # counterpart that only exists for platform-installed content — never
+    # for files COPY'd into the image, so the old bundled-model fallback
+    # registered paths ai-runtime could not open (HAILO_OPEN_FILE_FAILURE).
+    # The primary model source is therefore the AMPK bundle declared in
+    # app.yaml spec.models (app-manager unpacks it host-side and preloads
+    # the registration); this resolver only serves the self-registration
+    # fallback against the device model store.
+    _BUNDLED_MODEL_ROOT = "/opt/aipc/bundled-models"  # legacy, unused at runtime
 
     def _resolve_model_path(self, rel: str) -> str:
-        """Host-provisioned copy first; image-bundled fallback otherwise.
+        """Resolve a model file to a HOST-visible path, or fail loudly.
 
-        Devices that pre-provision /data/aipc/models keep using their own
-        copy; fresh installs fall back to the file bundled in the image so
-        installs are plug-and-play.
+        Host model store first (category-prefixed layout, same convention
+        as model-showcase). A missing store copy is an error, never a
+        fallback to an image-internal path — the bundled fallback used to
+        hand ai-runtime a host path that did not exist and the app retried
+        forever (see the contract comment above).
         """
         host = os.path.join(self.model_root, rel)
         if os.path.isfile(host):
             return host
-        return os.path.join(self._BUNDLED_MODEL_ROOT, os.path.basename(rel))
+        raise RuntimeError(
+            f"model file not found on the host-visible model store: {host} "
+            f"(rel={rel!r}). Expected spec.models preload to register this "
+            f"model; on platforms without bundled-package support, copy the "
+            f"HEF into the device model store at that path."
+        )
 
     def model_full_path(self) -> str:
         return self._resolve_model_path(self.model_def().path)
@@ -287,7 +318,7 @@ def load_config() -> GymConfig:
         fall_candidate_seconds=_env_int("FALL_CANDIDATE_SECONDS", 6),
         long_static_seconds=_env_int("LONG_STATIC_SECONDS", 120),
         config_path=config_path,
-        face_model=_env("FACE_MODEL", "mobilefacenet"),
+        face_model=_env("FACE_MODEL", ""),
         face_db_path=_env("FACE_DB_PATH", "/data/aipc/etc/gym-ops/faces.json"),
         face_threshold=_env_float("FACE_THRESHOLD", 0.6),
         face_cooldown_seconds=_env_float("FACE_COOLDOWN_SECONDS", 30.0),
