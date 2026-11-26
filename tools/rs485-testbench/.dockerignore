@@ -1,0 +1,7 @@
+# Only what the image copies; keeps dist/ and caches out of the build context.
+*
+!rs485_testbench/
+!templates/
+!app.py
+!app.yaml
+!requirements.txt

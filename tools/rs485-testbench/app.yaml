@@ -1,0 +1,47 @@
+# RS-485 Testbench: a bench tool for the platform RS-485 RX/TX path.
+# It installs like any other app and serves its console on the port below.
+apiVersion: v1
+kind: Application
+
+metadata:
+  id: rs485_testbench
+  name: RS-485 Testbench
+  version: 0.1.0
+  description: RS-485 RX/TX bench tool with a web console (live frames, run verdicts, TX burst, round trip)
+  author: NeoRuntime Team
+  email: opensource@camthink.ai
+
+spec:
+  image: neoruntime/rs485-testbench:0.1.0
+
+  resources:
+    cpu: "30%"
+    memory: "128Mi"
+
+  permissions:
+    # Device-control sockets are mounted for every app and RS-485 has no
+    # manifest permission yet (see docs/app-permissions.md), so there is
+    # nothing to declare for the bus itself.
+    network:
+      mode: host
+      inbound:
+        - 8097
+
+  env:
+    - name: WEB_PORT
+      value: "8097"
+
+  autostart: false
+  restart_policy: on-failure
+  restart_max_retries: 3
+
+  healthcheck:
+    enabled: true
+    interval: 30s
+    timeout: 5s
+    retries: 3
+
+  # The console writes nothing to disk: reports are downloaded by the browser.
+  security:
+    no_new_privileges: true
+    readonly_rootfs: true
