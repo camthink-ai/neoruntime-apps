@@ -39,6 +39,7 @@ containerized NeoRuntime apps.
 | `tools/visualizer/` | Tool | Real-time inference result preview |
 | `tools/parallel-benchmark/` | Tool | Parallel inference benchmark dashboard |
 | `tools/plugin-rtsp/` | Tool | C++ RTSP plugin example |
+| `tools/rs485-testbench/` | Tool | RS-485 RX/TX bench tool with a web console and a PC peer script |
 | `showcases/model-showcase/` | Showcase | Multi-model web showcase with visualization |
 | `showcases/parking-lot/` | Showcase | Parking-lot vehicle and plate extraction reference |
 | `showcases/gym-ops/` | Showcase | Gym pose coaching and occupancy reference |

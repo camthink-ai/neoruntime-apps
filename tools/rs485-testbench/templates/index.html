@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RS-485 Testbench</title>
+<style>
+  :root {
+    --paper: #f6f4ee;
+    --panel: #fffdf8;
+    --ink: #1a2027;
+    --muted: #66707c;
+    --line: #ddd8cd;
+    --accent: #0e6b5c;
+    --accent-soft: #e2f0ec;
+    --pass: #1b7a46;
+    --pass-soft: #e3f3e9;
+    --fail: #b3261e;
+    --fail-soft: #f8e5e3;
+    --warm: #8a5200;
+    --warm-soft: #f7ecd6;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--paper); color: var(--ink);
+    font: 15px/1.45 var(--sans);
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: baseline;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 14px; margin-left: 8px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+  .pill {
+    padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--panel); font: 12.5px var(--mono); color: var(--muted);
+  }
+  .pill.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .pill.warm { border-color: var(--warm); color: var(--warm); background: var(--warm-soft); }
+  .pill.bad { border-color: var(--fail); color: var(--fail); background: var(--fail-soft); }
+  .actions { display: flex; gap: 8px; }
+  main {
+    display: grid; gap: 14px; align-items: start;
+    grid-template-columns: minmax(230px, 1fr) minmax(0, 2.6fr) minmax(230px, 1fr);
+  }
+  .col { display: grid; gap: 14px; align-items: start; min-width: 0; }
+  @media (max-width: 980px) {
+    main { display: flex; flex-direction: column; }
+    .col { display: contents; }
+    #bus { order: 1; }
+    #verdict { order: 2; }
+    #frames { order: 3; }
+    #tx { order: 4; }
+    #rtt { order: 5; }
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px 14px;
+  }
+  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+  h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); }
+  .field { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .field > span:first-child { color: var(--muted); }
+  select, input[type="number"], input[type="text"] {
+    font: 13.5px var(--mono); padding: 4px 6px; border: 1px solid var(--line);
+    border-radius: 4px; background: #fff; color: var(--ink); min-width: 0;
+  }
+  input[type="number"] { width: 6.5em; }
+  input[type="text"] { flex: 1; width: 100%; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 4px 0 10px; color: var(--muted); }
+  .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  button {
+    font: 13.5px var(--sans); padding: 6px 11px; border-radius: 4px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink); cursor: pointer;
+    transition: background-color 120ms, border-color 120ms, transform 60ms;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #0b584b; color: #fff; }
+  button.danger:hover:not(:disabled) { border-color: var(--fail); color: var(--fail); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+  .error-line { color: var(--fail); font: 12.5px var(--mono); margin: 6px 0 0; word-break: break-word; }
+  .error-line:empty { display: none; }
+  .table-wrap { max-height: 64vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+  /* Fixed layout: the table never grows past its panel; long cells get an
+     ellipsis and carry the full text in a tooltip. */
+  table { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; font: 12.5px var(--mono); }
+  thead th {
+    position: sticky; top: 0; z-index: 1; background: #efebe2; text-align: left; font-weight: 600;
+    padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  tbody td {
+    padding: 4px 8px; border-bottom: 1px solid #efeadf; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  th:nth-child(1), td:nth-child(1) { width: 6%; }
+  th:nth-child(2), td:nth-child(2) { width: 14%; }
+  th:nth-child(3), td:nth-child(3) { width: 9%; }
+  th:nth-child(4), td:nth-child(4) { width: 6%; }
+  th:nth-child(5), td:nth-child(5) { width: 9%; }
+  th:nth-child(6), td:nth-child(6) { width: 7%; }
+  th:nth-child(7), td:nth-child(7) { width: 16%; }
+  th:nth-child(8), td:nth-child(8) { width: 19%; }
+  th:nth-child(9), td:nth-child(9) { width: 14%; }
+  /* Phone width: the verdict matters more than the frame list, and the
+     table keeps only the columns that still read. */
+  @media (max-width: 640px) {
+    #verdict { order: 2; }
+    #frames { order: 3; }
+    table { font-size: 11.5px; }
+    thead th, tbody td { padding-left: 5px; padding-right: 5px; }
+    th:nth-child(3), td:nth-child(3),
+    th:nth-child(7), td:nth-child(7),
+    th:nth-child(9), td:nth-child(9) { display: none; }
+    th:nth-child(1), td:nth-child(1) { width: 12%; }
+    th:nth-child(2), td:nth-child(2) { width: 27%; }
+    th:nth-child(4), td:nth-child(4) { width: 9%; }
+    th:nth-child(5), td:nth-child(5) { width: 15%; }
+    th:nth-child(6), td:nth-child(6) { width: 11%; }
+    th:nth-child(8), td:nth-child(8) { width: 26%; }
+  }
+  tbody tr.k-announce td { background: var(--accent-soft); color: var(--accent); }
+  tbody tr.k-corrupt td { background: var(--fail-soft); color: var(--fail); }
+  tbody tr.k-pong td { color: var(--muted); }
+  td.num { text-align: right; }
+  .empty { color: var(--muted); padding: 18px 10px; text-align: center; font: 13px var(--sans); }
+  .badge {
+    display: block; padding: 10px 12px; border-radius: 4px; border: 1px solid var(--line);
+    font: 700 20px var(--sans); text-align: center; margin-bottom: 10px; color: var(--muted);
+  }
+  .badge.pass { background: var(--pass-soft); border-color: var(--pass); color: var(--pass); }
+  .badge.fail { background: var(--fail-soft); border-color: var(--fail); color: var(--fail); }
+  .badge.running { background: var(--warm-soft); border-color: var(--warm); color: var(--warm); }
+  dl.stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 13.5px; }
+  dl.stats dt { color: var(--muted); }
+  dl.stats dd { margin: 0; font-family: var(--mono); text-align: right; }
+  ol.history { margin: 0; padding-left: 20px; font: 12.5px var(--mono); color: var(--muted); }
+  ol.history .pass { color: var(--pass); }
+  ol.history .fail { color: var(--fail); }
+  .missing { font: 12.5px var(--mono); color: var(--fail); word-break: break-all; margin: 6px 0 0; }
+  .missing:empty { display: none; }
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 16px);
+    background: var(--ink); color: #fff; padding: 9px 14px; border-radius: 4px;
+    font-size: 13.5px; opacity: 0; pointer-events: none; max-width: min(92vw, 640px);
+    transition: opacity 160ms, transform 160ms;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.bad { background: var(--fail); }
+</style>
+</head>
+<body>
+<header>
+  <h1>RS-485 Testbench <small>NeoRuntime</small></h1>
+  <div class="pills">
+    <span id="pill-bus" class="pill">bus: not inited</span>
+    <span id="pill-stream" class="pill">stream: idle</span>
+    <span id="pill-sdk" class="pill">sdk</span>
+  </div>
+  <div class="actions">
+    <button type="button" id="clear" class="danger">Clear</button>
+    <a href="/api/report"><button type="button">Download report</button></a>
+  </div>
+</header>
+
+<main>
+  <div class="col">
+  <section class="panel" id="bus">
+    <h2>Bus and stream</h2>
+    <label class="field"><span>Baud</span>
+      <select id="baud">
+        <option value="9600">9600</option>
+        <option value="19200">19200</option>
+        <option value="38400">38400</option>
+        <option value="57600">57600</option>
+        <option value="115200" selected>115200</option>
+      </select></label>
+    <label class="field"><span>Backlog</span>
+      <select id="queue">
+        <option value="0">default (16)</option>
+        <option value="16">16</option>
+        <option value="32">32</option>
+        <option value="64">64</option>
+        <option value="128">128</option>
+      </select></label>
+    <label class="check"><input type="checkbox" id="drop-old" checked> drop oldest frame when full</label>
+    <label class="field"><span>Slow consumer</span>
+      <input type="number" id="delay" min="0" max="10000" step="10" value="0"></label>
+    <div class="buttons">
+      <button type="button" id="apply">Apply</button>
+      <button type="button" id="init">Init</button>
+      <button type="button" id="deinit">Deinit</button>
+      <button type="button" id="sub-start" class="primary">Start stream</button>
+      <button type="button" id="sub-stop">Stop stream</button>
+      <button type="button" id="shadow-toggle">Start 2nd subscriber</button>
+    </div>
+    <p class="hint">8N1. Backlog and drop policy apply from the next stream start.
+      Slow consumer adds a delay per frame (ms) to reproduce a lagging reader.</p>
+    <p class="hint">The 2nd subscriber is an independent subscription (backlog 128, never
+      throttled): a slow main stream must not make it drop.</p>
+    <p class="error-line" id="stream-error"></p>
+  </section>
+
+  <section class="panel" id="tx">
+    <h2>Transmit</h2>
+    <label class="field"><span>Payload</span>
+      <select id="tx-mode">
+        <option value="text">text (UTF-8)</option>
+        <option value="hex">hex</option>
+      </select></label>
+    <div class="field">
+      <input type="text" id="tx-input" placeholder="OPEN 1" autocomplete="off">
+      <button type="button" id="tx-send">Send</button>
+    </div>
+    <h3>Numbered burst</h3>
+    <label class="field"><span>Frames</span><input type="number" id="burst-count" min="1" max="100000" step="1" value="100"></label>
+    <label class="field"><span>Payload bytes</span><input type="number" id="burst-size" min="0" max="499" step="1" value="32"></label>
+    <label class="field"><span>Gap ms</span><input type="number" id="burst-interval" min="0" max="60000" step="1" value="20"></label>
+    <div class="buttons">
+      <button type="button" id="burst-start">Start burst</button>
+      <button type="button" id="burst-stop">Stop</button>
+    </div>
+    <p class="hint" id="burst-status">idle</p>
+    <p class="hint">Watch it with <code>rs485_peer.py monitor</code> on the PC.</p>
+  </section>
+
+  <section class="panel" id="rtt">
+    <h2>Round trip</h2>
+    <p class="hint" style="margin:0 0 8px">Needs the peer in echo mode (<code>rs485_peer.py echo</code>) and a running stream.</p>
+    <label class="field"><span>Pings</span><input type="number" id="rtt-count" min="1" max="10000" step="1" value="20"></label>
+    <label class="field"><span>Payload bytes</span><input type="number" id="rtt-size" min="0" max="499" step="1" value="16"></label>
+    <label class="field"><span>Gap ms</span><input type="number" id="rtt-interval" min="0" max="60000" step="1" value="100"></label>
+    <label class="field"><span>Timeout ms</span><input type="number" id="rtt-timeout" min="1" max="60000" step="1" value="1000"></label>
+    <div class="buttons"><button type="button" id="rtt-start">Run round trip</button></div>
+    <h3>Result</h3>
+    <dl class="stats" id="rtt-stats"></dl>
+    <p class="hint">Each value covers device TX, the bus, the PC adapter and device RX. It includes the adapter's USB latency, so compare runs rather than reading it as platform latency.</p>
+  </section>
+  </div>
+  <div class="col">
+  <section class="panel" id="frames">
+    <h2>Frames <small>newest first · showing <span id="frames-shown">0</span></small></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>time</th><th>gap ms</th><th>len</th><th>kind</th>
+          <th>seq</th><th>note</th><th>hex</th><th>text</th>
+        </tr></thead>
+        <tbody id="frame-rows"><tr><td colspan="9" class="empty" id="frames-empty">No frames yet. Start the stream, then send from the peer.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  </div>
+  <div class="col">
+  <section class="panel" id="verdict">
+    <h2>Run verdict</h2>
+    <span id="verdict-badge" class="badge" aria-live="polite">no run</span>
+    <dl class="stats" id="run-stats"></dl>
+    <p class="missing" id="run-missing"></p>
+    <h3>2nd subscriber</h3>
+    <p class="hint" id="shadow-line">off</p>
+    <h3>Counters</h3>
+    <dl class="stats" id="counters"></dl>
+    <h3>Arrival gap</h3>
+    <dl class="stats" id="gaps"></dl>
+    <h3>Earlier runs</h3>
+    <ol class="history" id="history"></ol>
+  </section>
+  </div>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const POLL_MS = 500;
+const MAX_ROWS = 300;
+const $ = (id) => document.getElementById(id);
+const view = { lastIndex: -1, clearEpoch: 0 };
+
+async function post(path, body = {}) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({ error: response.statusText }));
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || response.statusText);
+  }
+  return data;
+}
+
+function toast(message, bad = false) {
+  const box = $("toast");
+  box.textContent = message;
+  box.className = "toast show" + (bad ? " bad" : "");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { box.className = "toast"; }, bad ? 8000 : 2500);
+}
+
+async function act(label, action) {
+  try {
+    await action();
+  } catch (error) {
+    toast(label + " failed: " + error.message, true);
+  }
+}
+
+const number = (id) => Number($(id).value);
+const fixed = (value, digits = 1) => (value == null ? "–" : Number(value).toFixed(digits));
+const yesNo = (value) => (value == null ? "–" : (value ? "yes" : "no"));
+
+function fill(list, entries) {
+  list.replaceChildren(...entries.flatMap(([name, value]) => {
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = name;
+    detail.textContent = value;
+    return [term, detail];
+  }));
+}
+
+function addRow(record) {
+  const empty = $("frames-empty");
+  if (empty) empty.closest("tr").remove();
+  const row = document.createElement("tr");
+  row.className = "k-" + record.kind;
+  const cells = [
+    record.i, record.time, record.gap_ms == null ? "" : record.gap_ms.toFixed(1),
+    record.len, record.kind, record.seq == null ? "" : record.seq,
+    record.note, record.hex, record.text,
+  ];
+  cells.forEach((value, index) => {
+    const cell = document.createElement("td");
+    if (index < 4 || index === 5) cell.className = "num";
+    cell.textContent = String(value);
+    cell.title = String(value);       // the full text behind an ellipsis
+    row.appendChild(cell);
+  });
+  const body = $("frame-rows");
+  body.prepend(row);
+  while (body.rows.length > MAX_ROWS) body.deleteRow(-1);
+}
+
+function resetTable() {
+  const body = $("frame-rows");
+  body.replaceChildren();
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = 9;
+  cell.className = "empty";
+  cell.id = "frames-empty";
+  cell.textContent = "No frames yet. Start the stream, then send from the peer.";
+  row.appendChild(cell);
+  body.appendChild(row);
+}
+
+function renderRun(run) {
+  const badge = $("verdict-badge");
+  const verdict = run.state === "running" ? "running" : (run.verdict || "idle");
+  badge.textContent = {
+    pass: "PASS", fail: "FAIL", running: "receiving…", idle: "no run",
+  }[verdict];
+  badge.className = "badge " + verdict;
+  const expected = run.expected == null ? "n/a" : run.expected;
+  const kept = run.head_kept == null ? "–"
+    : (run.head_kept ? "head kept" : "head dropped") + ", "
+      + (run.tail_kept ? "tail kept" : "tail dropped");
+  fill($("run-stats"), [
+    ["expected", expected],
+    ["received", run.ok],
+    ["missing", run.missing_count == null ? "–" : run.missing_count],
+    ["corrupt", run.corrupt],
+    ["duplicates", run.dup],
+    ["out of order", run.out_of_order],
+    ["bad payload", run.payload_bad],
+    ["out of range", run.unexpected],
+    ["kept", kept],
+    ["closed by", run.reason || "–"],
+    ["duration ms", fixed(run.duration_ms)],
+  ]);
+  $("run-missing").textContent = run.missing && run.missing.length
+    ? "missing seq: " + run.missing.join(" ") + ((run.missing_count || 0) > run.missing.length ? " …" : "")
+    : "";
+}
+
+function render(status) {
+  $("pill-bus").textContent = "bus: " + (status.inited ? "inited @ " + status.settings.baud : "not inited");
+  $("pill-bus").className = "pill" + (status.inited ? " on" : "");
+  const streamClass = { active: " on", connecting: " warm", stopping: " warm", error: " bad" }[status.stream.state] || "";
+  $("pill-stream").textContent = "stream: " + status.stream.state;
+  $("pill-stream").className = "pill" + streamClass;
+  $("pill-sdk").textContent = "sdk " + (status.sdk_version || "not installed");
+  $("stream-error").textContent = status.stream.last_error || "";
+
+  if (status.clear_epoch !== view.clearEpoch) {
+    view.clearEpoch = status.clear_epoch;
+    view.lastIndex = -1;
+    resetTable();
+  }
+  status.frames.forEach(addRow);
+  view.lastIndex = status.last_index;
+  $("frames-shown").textContent = $("frame-rows").rows.length;
+
+  renderRun(status.run);
+  fill($("counters"), [
+    ["frames", status.counters.frames],
+    ["bytes", status.counters.bytes],
+    ["raw", status.counters.raw],
+    ["vectors", status.counters.vectors],
+    ["corrupt", status.counters.corrupt],
+    ["avg fps", fixed(status.counters.fps)],
+  ]);
+  fill($("gaps"), [
+    ["samples", status.gaps.count],
+    ["min ms", fixed(status.gaps.min_ms, 3)],
+    ["avg ms", fixed(status.gaps.avg_ms, 3)],
+    ["p99 ms", fixed(status.gaps.p99_ms, 3)],
+    ["max ms", fixed(status.gaps.max_ms, 3)],
+  ]);
+  const history = $("history");
+  history.replaceChildren(...[...status.run_history].reverse().map((run) => {
+    const item = document.createElement("li");
+    const verdict = document.createElement("span");
+    verdict.className = run.verdict || "";
+    verdict.textContent = (run.verdict || "done").toUpperCase();
+    item.appendChild(verdict);
+    item.appendChild(document.createTextNode(
+      " expected " + (run.expected == null ? "n/a" : run.expected)
+      + " · got " + run.ok + " · missing " + (run.missing_count == null ? "–" : run.missing_count)));
+    return item;
+  }));
+
+  const shadow = status.shadow;
+  view.shadowOn = shadow.state === "running" || shadow.state === "stopping";
+  $("shadow-line").textContent = shadow.state === "off" ? "off"
+    : shadow.state + " · frames " + shadow.frames
+      + " · run " + (shadow.run.verdict ? shadow.run.verdict.toUpperCase() : shadow.run.state)
+      + " · got " + shadow.run.ok + " of " + (shadow.run.expected == null ? "n/a" : shadow.run.expected)
+      + (shadow.last_error ? " · " + shadow.last_error : "");
+  $("shadow-toggle").textContent = view.shadowOn ? "Stop 2nd subscriber" : "Start 2nd subscriber";
+
+  const burst = status.burst;
+  $("burst-status").textContent = burst.state === "idle" ? "idle"
+    : burst.state + " · sent " + burst.sent + " of " + burst.total
+      + " · errors " + burst.errors;
+
+  const rtt = status.rtt;
+  fill($("rtt-stats"), rtt.state === "idle" ? [] : [
+    ["state", rtt.state],
+    ["sent / lost", rtt.sent + " / " + rtt.lost],
+    ["min ms", fixed(rtt.min_ms, 3)],
+    ["avg ms", fixed(rtt.avg_ms, 3)],
+    ["p50 ms", fixed(rtt.p50_ms, 3)],
+    ["p99 ms", fixed(rtt.p99_ms, 3)],
+    ["max ms", fixed(rtt.max_ms, 3)],
+    ["of which on the line", fixed(rtt.serialization_ms, 3)],
+    ["error", rtt.error || "–"],
+  ]);
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/status?since=" + (view.lastIndex + 1));
+    if (!response.ok) throw new Error(response.statusText);
+    render(await response.json());
+  } catch (error) {
+    $("pill-stream").textContent = "stream: page lost";
+    $("pill-stream").className = "pill bad";
+  }
+}
+
+$("apply").addEventListener("click", () => act("Apply", () => post("/api/settings", {
+  baud: number("baud"), queue_size: number("queue"),
+  drop_old: $("drop-old").checked, consumer_delay_ms: number("delay"),
+})));
+$("init").addEventListener("click", () => act("Init", () => post("/api/init")));
+$("deinit").addEventListener("click", () => act("Deinit", () => post("/api/deinit")));
+$("sub-start").addEventListener("click", () => act("Start stream", () => post("/api/subscribe/start")));
+$("sub-stop").addEventListener("click", () => act("Stop stream", () => post("/api/subscribe/stop")));
+$("shadow-toggle").addEventListener("click", () => act("2nd subscriber", () => post(
+  view.shadowOn ? "/api/shadow/stop" : "/api/shadow/start")));
+$("clear").addEventListener("click", () => act("Clear", () => post("/api/clear")));
+
+function sendRaw() {
+  const key = $("tx-mode").value === "hex" ? "hex" : "text";
+  act("Send", () => post("/api/tx", { [key]: $("tx-input").value.trim() }));
+}
+$("tx-send").addEventListener("click", sendRaw);
+$("tx-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") sendRaw();
+});
+
+$("burst-start").addEventListener("click", () => act("Start burst", () => post("/api/burst/start", {
+  count: number("burst-count"), size: number("burst-size"), interval_ms: number("burst-interval"),
+})));
+$("burst-stop").addEventListener("click", () => act("Stop burst", () => post("/api/burst/stop")));
+$("rtt-start").addEventListener("click", () => act("Round trip", () => post("/api/rtt/start", {
+  count: number("rtt-count"), size: number("rtt-size"),
+  interval_ms: number("rtt-interval"), timeout_ms: number("rtt-timeout"),
+})));
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
